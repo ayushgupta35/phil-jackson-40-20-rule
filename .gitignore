@@ -5,3 +5,6 @@
 
 # Data (download from Kaggle; keep out of git by default)
 Games.csv
+
+# github_document also emits an HTML preview
+README.html
