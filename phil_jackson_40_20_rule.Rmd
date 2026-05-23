@@ -1,0 +1,589 @@
+---
+title: "Phil Jackson's 40-20 Rule: Strong Signal, Not Gospel"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    number_sections: false
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 9,
+  fig.height = 5.5,
+  dpi = 150,
+  out.width = "92%"
+)
+
+library(tidyverse)
+library(lubridate)
+library(gt)
+library(ggplot2)
+library(scales)
+library(glue)
+
+csv_path <- if (file.exists("Games.csv")) "Games.csv" else "games.csv"
+games <- read_csv(csv_path)
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16, color = "#111111"),
+      plot.subtitle = element_text(size = 11.5, color = "#4D4D4D"),
+      plot.caption = element_text(size = 9.5, color = "#666666"),
+      axis.title = element_text(face = "bold", color = "#222222"),
+      axis.text = element_text(color = "#333333"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      legend.position = "top",
+      legend.title = element_blank(),
+      legend.text = element_text(color = "#333333")
+    )
+)
+
+phil_blue <- "#17408B"
+phil_red <- "#C9082A"
+phil_teal <- "#2A9D8F"
+phil_gold <- "#E0A500"
+phil_gray <- "#6C757D"
+
+sporty_gt <- function(tbl) {
+  tbl %>%
+    opt_table_font(
+      font = list(
+        google_font("Inter"),
+        google_font("Source Sans 3"),
+        default_fonts()
+      )
+    ) %>%
+    tab_options(
+      table.width = pct(100),
+      heading.align = "left",
+      heading.background.color = "white",
+      table.border.top.color = phil_blue,
+      table.border.top.width = px(3),
+      table.border.bottom.color = "white",
+      column_labels.background.color = "#F3F6FA",
+      column_labels.font.weight = "bold",
+      column_labels.border.bottom.color = "#D9E2EC",
+      table_body.hlines.color = "#E6ECF2",
+      row.striping.background_color = "#FAFBFD",
+      data_row.padding = px(6),
+      source_notes.font.size = px(11)
+    )
+}
+
+fmt_pct1 <- function(x) scales::percent(x, accuracy = 0.1)
+fmt_pct0 <- function(x) scales::percent(x, accuracy = 1)
+```
+
+# Introduction
+
+Every NBA spring, once the standings begin to harden and the championship conversation narrows, Phil Jackson’s most famous regular-season benchmark comes roaring back into the discourse: a team must win 40 games before it loses 20 to be taken seriously as a title threat.
+
+With the 2025-26 playoffs underway, that idea is worth testing as more than a slogan. If the rule is truly meaningful, it should separate the league’s elite from the rest of the field and show up consistently among the teams that actually survive to June.
+
+This report treats the 40-before-20 rule as an empirical claim, not inherited wisdom. The question is simple: **was Phil Jackson right, or has the league spent years treating a strong heuristic like a law of basketball?**
+
+# Analysis
+
+## Statistical frame
+
+A contender filter should do two things well. It should be selective enough to identify a genuinely narrow class of teams, and it should appear frequently among the teams we know were real championship threats.
+
+To keep the analysis historically coherent, the study begins with the 1979-80 season, the first year of the three-point line. That cutoff matters because it keeps the test inside the modern offensive era most discussions of the rule already assume.
+
+Two shortened seasons are excluded because the 40-before-20 checkpoint is not directly comparable to a standard 82-game season:
+
+- **1998-99 (season = 1999):** 50-game lockout season.
+- **2020-21 (season = 2021):** 72-game COVID-shortened season.
+
+The point of those exclusions is not to protect the rule. It is to evaluate the benchmark under a common schedule structure, where “40 before 20” actually describes the same kind of regular-season grind from year to year.
+
+## Data preparation
+
+The source file is game-level, so every game is expanded into two team-level observations: one for the home team and one for the away team. That gives each franchise a chronological season path, allowing cumulative wins and losses to be tracked game by game.
+
+Seasons are assigned from the date field, with October through December games mapped to the following season year. From there, the report filters to regular-season games, removes shortened seasons, and builds team-season trajectories that can be tested against the Phil Jackson threshold.
+
+```{r data-prep}
+games_parsed <- games %>%
+  mutate(
+    date = coalesce(
+      ymd(gameDate, quiet = TRUE),
+      ymd_hms(gameDateTimeEst, quiet = TRUE),
+      mdy(gameDate, quiet = TRUE),
+      mdy_hms(gameDateTimeEst, quiet = TRUE)
+    ),
+    season = if_else(month(date) >= 10, year(date) + 1L, year(date))
+  )
+
+games_regular <- games_parsed %>%
+  filter(gameType == "Regular Season") %>%
+  filter(season >= 1980, !season %in% c(1999, 2021))
+
+home_rows <- games_regular %>%
+  transmute(
+    gameId,
+    season,
+    date,
+    teamId = hometeamId,
+    teamName = hometeamName,
+    opponentId = awayteamId,
+    opponentName = awayteamName,
+    home_away = "home",
+    team_points = homeScore,
+    opp_points = awayScore,
+    win = if_else(homeScore > awayScore, 1L, 0L)
+  )
+
+away_rows <- games_regular %>%
+  transmute(
+    gameId,
+    season,
+    date,
+    teamId = awayteamId,
+    teamName = awayteamName,
+    opponentId = hometeamId,
+    opponentName = hometeamName,
+    home_away = "away",
+    team_points = awayScore,
+    opp_points = homeScore,
+    win = if_else(awayScore > homeScore, 1L, 0L)
+  )
+
+team_games <- bind_rows(home_rows, away_rows) %>%
+  filter(!is.na(date), !is.na(season), !is.na(teamId), !is.na(teamName)) %>%
+  arrange(teamName, season, date, gameId) %>%
+  group_by(teamId, teamName, season)
+```
+
+## Method: the 40-20 test
+
+The rule is evaluated within each team-season in chronological order. For every game, cumulative wins and losses are updated, and a team is marked as having met the rule if it reaches 40 wins while still sitting below 20 losses.
+
+To make the result interpretable, the report also captures the first threshold each team reaches: either 40 wins or 20 losses. That checkpoint matters because it turns the rule from a vague talking point into a specific competitive fork in the road.
+
+```{r forty-twenty}
+team_games_progress <- team_games %>%
+  mutate(
+    cum_wins = cumsum(win),
+    cum_losses = row_number() - cum_wins
+  )
+
+team_hit <- team_games_progress %>%
+  filter(cum_wins >= 40, cum_losses < 20) %>%
+  slice_min(order_by = date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(teamId, teamName, season, hit_gameId = gameId, wins_at_hit = cum_wins, losses_at_hit = cum_losses)
+
+team_threshold <- team_games_progress %>%
+  filter(cum_wins >= 40 | cum_losses >= 20) %>%
+  slice_min(order_by = date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    teamId,
+    teamName,
+    season,
+    threshold_gameId = gameId,
+    wins_at_threshold = cum_wins,
+    losses_at_threshold = cum_losses,
+    threshold_type = if_else(cum_wins >= 40, "40 wins", "20 losses")
+  )
+
+team_season_summary <- team_games_progress %>%
+  summarize(
+    final_wins = max(cum_wins, na.rm = TRUE),
+    final_losses = max(cum_losses, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(team_hit, by = c("teamId", "teamName", "season")) %>%
+  left_join(team_threshold, by = c("teamId", "teamName", "season")) %>%
+  mutate(reached_40_before_20 = !is.na(hit_gameId))
+```
+
+## Finals teams as the stress test
+
+If the rule is supposed to identify true contenders, the most revealing test group is not all playoff teams. It is the teams that actually reached the NBA Finals.
+
+In this dataset, Finals participants are inferred from each season’s final playoff game and the two teams involved in that matchup. Champions are then identified as the team with the most Finals wins in that series.
+
+```{r finals}
+playoffs_games <- games_parsed %>%
+  filter(
+    gameType == "Playoffs",
+    !season %in% c(1999, 2021),
+    !is.na(date)
+  )
+
+finals_last_game <- playoffs_games %>%
+  group_by(season) %>%
+  slice_max(order_by = date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    season,
+    final_home_id = hometeamId,
+    final_away_id = awayteamId
+  )
+
+finals_games <- playoffs_games %>%
+  inner_join(finals_last_game, by = "season") %>%
+  filter(
+    (hometeamId == final_home_id & awayteamId == final_away_id) |
+      (hometeamId == final_away_id & awayteamId == final_home_id)
+  )
+
+finals_team_games <- bind_rows(
+  finals_games %>%
+    transmute(
+      season,
+      teamId = hometeamId,
+      teamName = hometeamName,
+      win = winner == hometeamId
+    ),
+  finals_games %>%
+    transmute(
+      season,
+      teamId = awayteamId,
+      teamName = awayteamName,
+      win = winner == awayteamId
+    )
+) %>%
+  filter(!is.na(teamId), !is.na(teamName))
+
+finals_teams <- finals_team_games %>%
+  distinct(season, teamId, teamName)
+
+finals_champions <- finals_team_games %>%
+  group_by(season, teamId, teamName) %>%
+  summarize(finals_wins = sum(win, na.rm = TRUE), .groups = "drop") %>%
+  group_by(season) %>%
+  slice_max(order_by = finals_wins, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(won_title = TRUE) %>%
+  select(season, teamId, teamName, won_title)
+
+finals_summary <- finals_teams %>%
+  left_join(finals_champions, by = c("season", "teamId", "teamName")) %>%
+  mutate(won_title = if_else(is.na(won_title), FALSE, won_title)) %>%
+  left_join(team_season_summary, by = c("season", "teamId", "teamName")) %>%
+  select(
+    season,
+    finalist_teamName = teamName,
+    won_title,
+    wins_at_threshold,
+    losses_at_threshold,
+    threshold_type,
+    final_wins,
+    final_losses,
+    reached_40_before_20
+  ) %>%
+  filter(
+    !is.na(final_wins),
+    !is.na(final_losses),
+    !is.na(wins_at_threshold),
+    !is.na(losses_at_threshold),
+    !is.na(reached_40_before_20)
+  )
+
+finals_exceptions <- finals_summary %>%
+  filter(reached_40_before_20 == FALSE)
+```
+
+# Results
+
+## Team-level patterns
+
+```{r summary-stats}
+num_seasons <- n_distinct(team_season_summary$season)
+num_team_seasons <- nrow(team_season_summary)
+num_meet_rule <- sum(team_season_summary$reached_40_before_20, na.rm = TRUE)
+percent_meet_rule <- num_meet_rule / num_team_seasons
+
+num_finals_teams <- nrow(finals_summary)
+num_finals_meet_rule <- sum(finals_summary$reached_40_before_20, na.rm = TRUE)
+percent_finals_meet_rule <- num_finals_meet_rule / num_finals_teams
+```
+
+Across **`r num_seasons` seasons**, the dataset contains **`r num_team_seasons` team-seasons** after excluding the shortened 1999 and 2021 campaigns. Of those, **`r num_meet_rule` teams** reached 40 wins before 20 losses, or **`r fmt_pct1(percent_meet_rule)`** of the full population.
+
+That is the first important finding. Only about **15% of all teams** clear this bar, which means the rule is highly selective by design. It does not identify “pretty good” teams; it identifies teams that spend the first 60 games operating at a distinctly elite level.
+
+```{r scorecard}
+scorecard <- tibble(
+  metric = c(
+    "Seasons analyzed",
+    "Total team-seasons",
+    "Teams that met 40-before-20",
+    "Share of all team-seasons that met the rule",
+    "Finals teams",
+    "Finals teams that met the rule",
+    "Share of Finals teams that met the rule"
+  ),
+  value = c(
+    num_seasons,
+    num_team_seasons,
+    num_meet_rule,
+    fmt_pct1(percent_meet_rule),
+    num_finals_teams,
+    num_finals_meet_rule,
+    fmt_pct1(percent_finals_meet_rule)
+  )
+)
+
+scorecard %>%
+  gt() %>%
+  tab_header(
+    title = md("**40-Before-20 Scorecard**"),
+    subtitle = "Three-point era only (1980 onward), excluding the shortened 1999 and 2021 seasons"
+  ) %>%
+  cols_label(
+    metric = "Metric",
+    value = "Result"
+  ) %>%
+  sporty_gt()
+```
+
+## Finals teams
+
+Among **`r num_finals_teams` Finals teams**, **`r num_finals_meet_rule`** met the benchmark, which works out to **`r fmt_pct1(percent_finals_meet_rule)`**. That is strong evidence in Phil Jackson’s favor: most teams that survive to the championship round do, in fact, clear the threshold.
+
+But that does not make the rule absolute. Finals teams are already an elite subset, and the more revealing question is not whether many of them pass the test. It is whether the rule misses anyone who was good enough to get all the way to June anyway.
+
+Here is the cleanest read of the findings:
+
+- **Selective benchmark:** only about 15% of all team-seasons qualify.
+- **Strong contender signal:** most Finals teams do qualify.
+- **Not a law:** some Finals teams miss the benchmark, and a few of them still win the championship.
+
+```{r table-finals}
+if (nrow(finals_exceptions) == 0) {
+  cat("No Finals teams in the current mapping missed the 40-20 rule. This usually means the Finals list is incomplete or does not include known exception seasons. Update finals_teams to continue the analysis.")
+} else {
+  finals_exceptions %>%
+    arrange(season) %>%
+    mutate(
+      won_title = if_else(won_title, "Yes", "No"),
+      reached_40_before_20 = if_else(reached_40_before_20, "Yes", "No")
+    ) %>%
+    gt() %>%
+    tab_header(
+      title = md("**Finals Teams Who Missed 40-20**"),
+      subtitle = "Teams that reached 20 losses before 40 wins and still advanced to the NBA Finals"
+    ) %>%
+    cols_label(
+      season = "Season",
+      finalist_teamName = "Finals Team",
+      won_title = "Won Title",
+      wins_at_threshold = "Wins at Threshold",
+      losses_at_threshold = "Losses at Threshold",
+      threshold_type = "Threshold",
+      final_wins = "Final Wins",
+      final_losses = "Final Losses",
+      reached_40_before_20 = "Met 40-20"
+    ) %>%
+    cols_align(align = "center", columns = c(season, won_title, wins_at_threshold, losses_at_threshold, final_wins, final_losses, reached_40_before_20)) %>%
+    sporty_gt() %>%
+    tab_source_note(
+      source_note = md("Threshold record captures the first moment a team hit either **40 wins** or **20 losses**.")
+    )
+}
+```
+
+This table is where the rule starts to bend. These are the teams that reached **20 losses before 40 wins** and still found a path to the Finals, which makes them the most important exceptions in the report.
+
+## Champions and the rule
+
+To translate the rule into championship terms, the chart below compares title winners that met the benchmark with title winners that did not.
+
+```{r plot-champions-40-20-pie}
+champions_rule <- finals_summary %>%
+  filter(won_title) %>%
+  mutate(bucket = if_else(reached_40_before_20, "Met 40-20", "Did not meet 40-20")) %>%
+  count(bucket) %>%
+  mutate(
+    pct = n / sum(n),
+    label = glue("{bucket}\n{n} champions ({fmt_pct0(pct)})")
+  )
+
+if (nrow(champions_rule) == 0) {
+  cat("No Finals champions found in the current data.")
+} else {
+  plot_champions_rule_pie <- champions_rule %>%
+    ggplot(aes(x = "", y = n, fill = bucket)) +
+    geom_col(width = 1, color = "white", linewidth = 1) +
+    coord_polar(theta = "y") +
+    geom_text(
+      aes(label = label),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      fontface = "bold",
+      size = 3.8,
+      lineheight = 1.05
+    ) +
+    scale_fill_manual(values = c("Met 40-20" = phil_blue, "Did not meet 40-20" = phil_red)) +
+    labs(
+      title = "How Often Champions Cleared the Benchmark",
+      subtitle = "Most champions met the 40-before-20 rule, but a small set of title teams did not",
+      caption = "Seasons included: 1980 onward, excluding 1999 and 2021."
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "none"
+    )
+
+  plot_champions_rule_pie
+}
+```
+
+A chart like this is useful because it keeps the argument disciplined. The benchmark clearly aligns with championship caliber most of the time, but not all of the time. That distinction is the heart of the report: the rule is powerful as a signal, weaker as a guarantee.
+
+```{r table-finals-winners}
+finals_exception_winners <- finals_exceptions %>%
+  filter(won_title) %>%
+  arrange(season)
+
+if (nrow(finals_exception_winners) == 0) {
+  cat("No Finals winners missed the 40-20 rule in the current data.")
+} else {
+  finals_exception_winners %>%
+    gt() %>%
+    tab_header(
+      title = md("**Champions Who Missed 40-20**"),
+      subtitle = "The strongest evidence against treating the Phil Jackson rule as a hard law"
+    ) %>%
+    cols_label(
+      season = "Season",
+      finalist_teamName = "Champion",
+      wins_at_threshold = "Wins at Threshold",
+      losses_at_threshold = "Losses at Threshold",
+      threshold_type = "Threshold",
+      final_wins = "Final Wins",
+      final_losses = "Final Losses"
+    ) %>%
+    cols_align(align = "center", columns = c(season, wins_at_threshold, losses_at_threshold, final_wins, final_losses)) %>%
+    sporty_gt() %>%
+    tab_source_note(
+      source_note = md("These teams won the title despite reaching **20 losses before 40 wins**.")
+    )
+}
+```
+
+If there is one section that prevents the rule from being treated as gospel, it is this one. The **1995 Rockets**, **2004 Pistons**, and **2006 Heat** are not trivia answers; they are championship counterexamples that force a more careful interpretation of the rule.
+
+# Visuals
+
+## Finals exceptions outcome
+
+```{r plot-finals-pie}
+if (nrow(finals_exceptions) == 0) {
+  cat("No Finals exceptions to plot. Update finals_teams with known exception seasons to populate this chart.")
+} else {
+  pct_exception_champions <- finals_exceptions %>%
+    summarize(pct = mean(won_title), .groups = "drop") %>%
+    pull(pct)
+
+  plot_finals_pie <- finals_exceptions %>%
+    count(won_title) %>%
+    mutate(
+      label = if_else(won_title, "Champions", "Runner-ups"),
+      pct = n / sum(n),
+      text_label = glue("{label}\n{n} teams ({fmt_pct0(pct)})")
+    ) %>%
+    ggplot(aes(x = "", y = n, fill = label)) +
+    geom_col(width = 1, color = "white", linewidth = 1) +
+    coord_polar(theta = "y") +
+    geom_text(
+      aes(label = text_label),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      fontface = "bold",
+      size = 3.8,
+      lineheight = 1.05
+    ) +
+    scale_fill_manual(values = c("Champions" = phil_blue, "Runner-ups" = phil_red)) +
+    labs(
+      title = "What Happened to Finals Exceptions",
+      subtitle = "Most Finals teams that missed 40-before-20 still fell short of the championship",
+      caption = "Population shown: Finals teams that did not meet the 40-20 rule."
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "none"
+    )
+
+  plot_finals_pie
+}
+```
+
+This chart narrows the lens to the teams that failed the benchmark but still reached the Finals. In this sample, only **`r fmt_pct0(pct_exception_champions)`** of those exception teams went on to win the title, which reinforces an important point: breaking the rule does not eliminate a team, but it usually leaves less margin for error.
+
+## Finals winners: wins at 20 losses
+
+```{r plot-finals-winners-hist}
+if (nrow(finals_exception_winners) == 0) {
+  cat("No Finals winners missed the 40-20 rule in the current data.")
+} else {
+  winners_20_losses <- finals_exception_winners %>%
+    filter(threshold_type == "20 losses") %>%
+    arrange(wins_at_threshold, season) %>%
+    mutate(
+      label = paste0(season, " ", finalist_teamName),
+      label = factor(label, levels = label)
+    )
+
+  if (nrow(winners_20_losses) == 0) {
+    cat("Finals winners who missed 40-20 did not hit 20 losses first in this data.")
+  } else {
+    plot_winners_hist <- winners_20_losses %>%
+      ggplot(aes(x = label, y = wins_at_threshold)) +
+      geom_col(fill = phil_teal, width = 0.68) +
+      geom_text(aes(label = wins_at_threshold), vjust = -0.4, fontface = "bold", size = 4) +
+      geom_hline(yintercept = 40, linetype = "dashed", color = phil_red, linewidth = 0.8) +
+      annotate(
+        "text",
+        x = 1.15,
+        y = 40.9,
+        label = "40-win benchmark",
+        color = phil_red,
+        hjust = 0,
+        size = 3.6,
+        fontface = "bold"
+      ) +
+      scale_y_continuous(limits = c(0, 42), breaks = seq(0, 40, 5), expand = expansion(mult = c(0, 0.04))) +
+      labs(
+        title = "Where the Champion Exceptions Stood at Loss No. 20",
+        subtitle = "All three title exceptions were still below the 40-win line when the rule would have ruled them out",
+        x = NULL,
+        y = "Wins at 20th loss",
+        caption = "Exception champions shown: 1995 Rockets, 2004 Pistons, 2006 Heat."
+      ) +
+      theme(
+        axis.text.x = element_text(face = "bold", color = "#333333"),
+        panel.grid.major.x = element_blank()
+      )
+
+    plot_winners_hist
+  }
+}
+```
+
+This is the clearest visual rebuttal to a literal reading of the rule. The three championship exceptions were all below the line when loss number 20 arrived, which means Phil Jackson’s benchmark would have screened out teams that ultimately proved good enough to win the title anyway.
+
+# Verdict
+
+Phil Jackson was **mostly right** about what the 40-before-20 rule captures. It is a sharp contender filter, and the selectivity matters: only about 15% of all team-seasons reach that standard, while most Finals teams do.
+
+But the benchmark breaks the moment it is treated as a hard law. Championship exceptions exist, and they are not marginal edge cases. They are title teams that remind us how much playoff success depends on factors the rule cannot see: health, matchup leverage, roster changes, star-level shot creation, defensive adaptability, and late-season improvement.
+
+The best interpretation is the most disciplined one. **40-before-20 is a strong signal of contender quality, not a guarantee of who gets the trophy in June.**
